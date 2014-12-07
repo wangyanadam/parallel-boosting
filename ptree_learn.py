@@ -47,8 +47,8 @@ def __main__():
             ("spark.io.compression.codec", "lzf"),\
             ("spark.shuffle.manager", "SORT"),\
             ]
-    conf = SparkConf().setAll(properties)
-
+    #conf = SparkConf().setAll(properties)
+    conf = SparkConf()
 
     sc = SparkContext(conf=conf)
 
