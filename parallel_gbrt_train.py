@@ -10,6 +10,7 @@ from pyspark.mllib.regression import RidgeRegressionWithSGD
 from pyspark.mllib.regression import LinearRegressionWithSGD
 
 import numpy as np
+import pickle as pk
 from sklearn import tree
 
 def __main__():
@@ -18,7 +19,7 @@ def __main__():
     num_learners = 1
     num_parts = 1
     field_sep = '\t'
-    out_dir = 'file:/filer/tmp1/yw298/spark/output'
+    output_path = '/filer/tmp1/yw298/spark/output/model.out'
 
     # Parameters for base learner
     max_depth = None
@@ -57,7 +58,7 @@ def __main__():
         elif opt_val[0] == '--min_samples_split':
             min_samples_split = int(opt_val[1])
         elif opt_val[0] == '--output':
-            out_dir = str(opt_val[1])
+            output_path = str(opt_val[1])
         elif opt_val[0] == '--regularizer':
             regularizer = str(opt_val[1])
         elif opt_val[0] == '--niters':
@@ -71,7 +72,7 @@ def __main__():
     print '>>> num_learners = %s' % str(num_learners)
     print '>>> num_parts = %s' % str(num_parts)
     print '>>> field_sep = %s' % str(field_sep)
-    print '>>> out_dir = %s' % str(out_dir)
+    print '>>> output_path = %s' % str(output_path)
     print '>>> max_depth = %s' % str(max_depth)
     print '>>> max_features = %s' % str(max_features)
     print '>>> min_samples_leaf = %s' % str(min_samples_leaf)
@@ -220,25 +221,22 @@ def __main__():
                 step = step_size \
                 )
 
-    coeffs_kv = [(0, coeffs.intercept)]
-    kid = 1
-    for w in coeffs.weights:
-        coeffs_kv.append((kid, w))
-        kid += 1
+    coeffs_enum = list(enumerate(coeffs.weights, start = 1))
+    coeffs_enum.insert(0, (0, coeffs.intercept))
+    coeffs_rdd = sc.parallelize(coeffs_enum)
 
-    coeffs_rdd = sc.parallelize(coeffs_kv)
-    ensemble_learner = learner_class.join(coeffs_rdd)
-
-    # Save the learner class and coefficients
-    learner_class.saveAsPickleFile(out_dir + '/sampled_learners')
-    coeffs_rdd.saveAsTextFile(out_dir + '/fitted_coefficients')
-    ensemble_learner.saveAsPickleFile(out_dir + '/ensemble_learner')
+    ensemble_learner = coeffs_rdd.join(learner_class).collect()
+    
+    # Save the ensemble learner
+    file_ensemble_learner = open(output_path, 'w')
+    pk.dump(ensemble_learner, file_ensemble_learner)
+    file_ensemble_learner.close()
 
     # Testing code
-    for l in ensemble_learner.collect():
+    for l in ensemble_learner:
         print "Regressor %i: " % l[0]
-        print l[1][0][1]
-        print l[1][1]
+        print l[1][0]
+        print l[1][1][1]
 
     sc.stop()
 
