@@ -4,9 +4,8 @@ import string as st
 
 from pyspark import SparkContext
 from pyspark import SparkConf
+from pyspark import StorageLevel
 from pyspark.mllib.regression import LabeledPoint
-from pyspark.mllib.regression import LassoWithSGD
-from pyspark.mllib.regression import RidgeRegressionWithSGD
 from pyspark.mllib.regression import LinearRegressionWithSGD
 
 import numpy as np
@@ -18,8 +17,9 @@ def __main__():
     input_path = ""
     num_learners = 1
     num_parts = 1
-    field_sep = '\t'
-    output_path = '/filer/tmp1/yw298/spark/output/model.out'
+    output_path = '/filer/tmp1/yw298/spark/output/'
+    fs = 'file:'
+    save_data = 0
 
     # Parameters for base learner
     max_depth = None
@@ -28,27 +28,22 @@ def __main__():
     min_samples_split = 2
 
     # Parameters for coefficient fitting
-    regularizer = 'None'
+    regularizer = None
     niters = 100
-    reg_term = 1.0
+    reg_weight = 1.0
     step_size = 1.0
+    batch_frac = 1
     
     for option in sys.argv:
         opt_val = option.split('=')
         if opt_val[0] == '--input':
             input_path = str(opt_val[1])
+        elif opt_val[0] == '--fs':
+            fs = str(opt_val[1])
         elif opt_val[0] == '--num_learners':
-            num_learners = int(opt_val[1])
+            num_learners = int(opt_val[1]) - 1
         elif opt_val[0] == '--num_parts':
             num_parts = int(opt_val[1])
-        elif opt_val[0] == '--field_sep':
-            if opt_val[1] == 't':
-                field_sep = '\t'
-            elif opt_val[1] == 's':
-                field_sep = ','
-            else:
-                print >> sys.stderr, "Delimiter: wrong format, neither <tab> nor <,>"
-                exit(-1)
         elif opt_val[0] == '--max_depth':
             max_depth = int(opt_val[1])
         elif opt_val[0] == '--max_features':
@@ -63,15 +58,18 @@ def __main__():
             regularizer = str(opt_val[1])
         elif opt_val[0] == '--niters':
             niters = int(opt_val[1])
-        elif opt_val[0] == '--reg_term':
-            reg_term = float(opt_val[1])
+        elif opt_val[0] == '--reg_weight':
+            reg_weight = float(opt_val[1])
         elif opt_val[0] == '--step_size':
             step_size = float(opt_val[1])
+        elif opt_val[0] == '--batch_fraction':
+            batch_frac = float(opt_val[1])
+        elif opt_val[0] == '--save_data':
+            save_data = int(opt_val[1])
 
     print '>>> input_path = %s' % str(input_path)
     print '>>> num_learners = %s' % str(num_learners)
     print '>>> num_parts = %s' % str(num_parts)
-    print '>>> field_sep = %s' % str(field_sep)
     print '>>> output_path = %s' % str(output_path)
     print '>>> max_depth = %s' % str(max_depth)
     print '>>> max_features = %s' % str(max_features)
@@ -79,8 +77,11 @@ def __main__():
     print '>>> min_samples_split = %s' % str(min_samples_split)
     print '>>> regularizer = %s' % str(regularizer)
     print '>>> niters = %s' % str(niters)
-    print '>>> reg_term = %s' % str(reg_term)
+    print '>>> reg_weight = %s' % str(reg_weight)
     print '>>> step_size = %s' % str(step_size)
+    print '>>> file_system = %s' % str(fs)
+    print '>>> batch_fraction = %s' % str(batch_frac)
+    print '>>> save_data = %s' % str(save_data)
 
     if input_path == "":
         print >> sys.stderr, "Usage: parallel boosting training <file>"
@@ -95,12 +96,11 @@ def __main__():
     def func_pmap_rndpartition(p_iter):
         rnd.seed()
 
-        for yx in p_iter:
-            [ystr, xstr] = st.split(yx, field_sep, maxsplit = 1)
-            yval = float(ystr)
-            xvec = np.fromstring(string = xstr, sep = field_sep)
+        for (k, v) in p_iter:
+            yval = v[0]
+            xvec = v[1]
 
-            kv_pair = (rnd.randint(1, num_learners), (yval, xvec))
+            kv_pair = (rnd.randint(1, num_learners + 1), (yval, xvec))
             yield kv_pair
 
     # Map function of mapping training data to each learner (2):
@@ -109,41 +109,23 @@ def __main__():
     def func_pmap_rndlabeling(p_iter):
         rnd.seed()
 
-        for yx in p_iter:
-            [ystr, xstr] = st.split(yx, field_sep, maxsplit = 1)    
-            yval = float(ystr)
-            xvec = np.fromstring(string = xstr, sep = field_sep)
+        for v in p_iter:
+            yval = v[0]
+            xvec = v[1]
 
             # Emitting the training set with true labels
             yield (0, (yval, xvec))
 
             # Emitting the training sets with corrupted labels
             for tid in range(num_learners):
-                sigma = rnd.gauss(0, 1)
-                yval_rnd = yval * sigma
+                coin = rnd.random()
+                if coin < 0.5:
+                    yval_rnd = -yval
+                else:
+                    yval_rnd = yval
 
                 kv_pair = (tid + 1, (yval_rnd, xvec))
                 yield kv_pair
-
-    # Map function of mapping training data to each learner (3):
-    # Same purpose as (2), but mapping on examples.
-    def func_map_rndlabeling(yx):
-        rnd.seed()
-
-        [ystr, xstr] = st.split(yx, field_sep, maxsplit = 1)
-        yval = float(ystr)
-        xvec = np.fromstring(string = xstr, sep = field_sep)
-
-        # Emitting the training set with true labels
-        yield (0, (yval, xvec))
-
-        # Emitting the training sets with corrupted labels
-        for tid in range(num_learners):
-            sigma = rnd.gauss(0, 1)
-            yval_rnd = yval * sigma
-
-            kv_pair = (tid + 1, (yval_rnd, xvec))
-            yield kv_pair
 
     # Def of mapping function for training each learner
     def func_train_learner((key, data)):
@@ -156,87 +138,78 @@ def __main__():
             xmat.append(xvec)
             yvec.append(yval)
 
-        learner = None
-        if key != 0:
-            # Train learner
-            learner = tree.DecisionTreeRegressor( \
-                    max_depth = max_depth, \
-                    max_features = max_features, \
-                    min_samples_leaf = min_samples_leaf, \
-                    min_samples_split = min_samples_split \
-                    )
-            learner.fit(xmat, yvec)
+        # Train learner
+        learner = tree.DecisionTreeRegressor( \
+                max_depth = max_depth, \
+                max_features = max_features, \
+                min_samples_leaf = min_samples_leaf, \
+                min_samples_split = min_samples_split \
+                )
+        learner.fit(xmat, yvec)
 
-        return (key, (learner, yvec))
+        return (key, learner)
 
     # Hypothesis sampling
-    train_data_HS = sc.textFile(input_path, 1).repartition(num_parts)
+    train_data_HS = sc.pickleFile(fs + input_path) \
+            .repartition(num_parts) \
+            .persist(StorageLevel.MEMORY_AND_DISK)
+
     train_data_map_HS = train_data_HS.mapPartitions(func_pmap_rndlabeling).\
             combineByKey(createCombiner = lambda v : [v], \
             mergeValue = lambda c, v : c + [v], \
             mergeCombiners = lambda c1, c2 : c1 + c2 \
             )
-    learner_class = train_data_map_HS.map(func_train_learner)
-    learner_class_collected = learner_class.collect()
+
+    learner_class = train_data_map_HS.map(func_train_learner).collect()
+    learner_class_broadcast = sc.broadcast(learner_class)
 
     # Map function of generating training data for coefficient fitting
-    def func_map_ypredmat(yx):
-        [ystr, xstr] = st.split(yx, field_sep, maxsplit = 1)
-        yval = float(ystr)
-        xvec = np.fromstring(string = xstr, sep = field_sep)
+    def func_map_ypredmat(v):
+            yval = v[0]
+            xvec = v[1]
 
-        values = np.zeros(num_learners + 1)
-        for l in learner_class_collected:
-            if l[0] != 0:
-                values[l[0]] = l[1][0].predict(xvec)
-            else:
-                values[l[0]] = yval
+            values = np.zeros(num_learners + 1)
+            for l in learner_class_broadcast.value:
+                values[l[0]] = l[1].predict(xvec)
 
-        return LabeledPoint(values[0], values[1:])
+            return LabeledPoint(yval, values)
 
     # Coefficient fitting
-    coeffs = None
-    train_data_CF = train_data_HS.map(func_map_ypredmat)
-    if regularizer == 'l1':
-        # Lasso regression
-        coeffs = LassoWithSGD.train( \
-                data = train_data_CF, \
-                iterations = niters, \
-                step = step_size, \
-                regParam = reg_term \
-                )
-    elif regularizer == 'l2':
-        # Ridge regression
-        coeffs = RidgeRegressionWithSGD.train( \
-                data = train_data_CF, \
-                iterations = niters, \
-                step = step_size, \
-                regParam = reg_term \
-                )
-    else:
-        # Least-square regression
-        coeffs = LinearRegressionWithSGD.train( \
-                data = train_data_CF, \
-                iterations = niters, \
-                step = step_size \
-                )
+    train_data_CF = train_data_HS \
+            .map(func_map_ypredmat) \
+            .persist(StorageLevel.MEMORY_AND_DISK)
 
-    coeffs_enum = list(enumerate(coeffs.weights, start = 1))
-    coeffs_enum.insert(0, (0, coeffs.intercept))
-    coeffs_rdd = sc.parallelize(coeffs_enum)
+    coeffs = LinearRegressionWithSGD.train(\
+            data = train_data_CF, \
+            iterations = niters, \
+            step = step_size, \
+            regType = regularizer, \
+            regParam = reg_weight, \
+            miniBatchFraction = batch_frac, \
+            intercept = False
+            )
 
-    ensemble_learner = coeffs_rdd.join(learner_class).collect()
-    
-    # Save the ensemble learner
-    file_ensemble_learner = open(output_path, 'w')
-    pk.dump(ensemble_learner, file_ensemble_learner)
-    file_ensemble_learner.close()
+    coeffs_list = sorted(list(enumerate(coeffs.weights, start = 1)), \
+            key = lambda kv : kv[0])
 
-    # Testing code
-    for l in ensemble_learner:
-        print "Regressor %i: " % l[0]
-        print l[1][0]
-        print l[1][1][1]
+    learner_class_list = sorted(learner_class, \
+            key = lambda kv : kv[0])
+
+    if save_data:
+        # Save the raw training data
+        train_data_HS.saveAsPickleFile(path = fs + output_path + '/train_data', batchSize = 10240)
+
+        # Save the coeff-fit training data
+        train_data_CF.saveAsPickleFile(path = fs + output_path + '/coeff_data',  batchSize = 10240)
+
+    # Save the learner class and fitted coefficients
+    file = open(output_path + '/learner_class', 'w')
+    pk.dump(learner_class_list, file)
+    file.close()
+
+    file = open(output_path + '/fitted_coeffs', 'w')
+    pk.dump(coeffs_list, file)
+    file.close()
 
     sc.stop()
 
